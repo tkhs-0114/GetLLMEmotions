@@ -21,6 +21,7 @@ step0/                  モデルの準備
 step1-getStory/output/  step1の出力 (ストーリー)
 step2-getHiddenState/output/  step2の出力 (感情ごとの平均hidden state)
 step3-getEmovitonVec/output/  step3の出力 (感情ベクトル)
+step4-trackEmotion/output/    step4の出力 (トークンごとの感情の類似度)
 old-project/            移植元の旧プロジェクト
 ```
 
@@ -87,3 +88,78 @@ Ollama上のLLM (`llama3.1:8b`、OpenAI互換API `/v1/chat/completions`) を使�
   - `step3-getEmovitonVec/output/emotion_vector_{感情}.pt` (感情ベクトル)
 
 いずれも層ごとのベクトルのリスト (step2の出力と同じ形式)。
+
+### step4
+
+ローカルLLM (`my_local_llama3/`) にプロンプトを入力して応答を生成させ、入力と出力の各トークンについて、指定した層のhidden stateと各感情ベクトルとのコサイン類似度を計算する。
+
+論文では、モデル全体の約2/3の深さの層 (Llama-3.1-8Bでは `hidden_states[21]` 付近) が出力しようとしている感情をよく表すとされている。そのため使用する層はスクリプト内の定数で切り替えられるようにする。
+論文で行われている「中立的な対話の主成分の除去」によるノイズ除去は今回は実施しない。
+
+- スクリプト: `step4-trackEmotion/main.py`
+- 入力:
+  - プロンプト (コマンドライン引数で指定)
+  - `step3-getEmovitonVec/output/emotion_vector_{感情}.pt` (8感情分。`neutral` は使用しない)
+- 出力: `step4-trackEmotion/output/{実行日時}.json`
+
+#### 定数
+
+| 定数             | 内容                                                     | 初期値 |
+| ---------------- | -------------------------------------------------------- | ------ |
+| `TARGET_LAYER`   | 使用する `hidden_states` のインデックス (0はEmbedding層) | `21`   |
+| `MAX_NEW_TOKENS` | 生成する最大トークン数                                   | `200`  |
+
+#### 処理の流れ
+
+1. プロンプトを `Human: {プロンプト}\n\nAssistant:` の形式に整形する (対象モデルはベースモデルのため、論文と同じ形式を使う)。
+2. モデルに応答を生成させる。再現性のためgreedy decodingとし、ベースモデルが次の `Human:` ターンを書き始めた時点 (`\nHuman:`) で生成を止める。
+3. 整形済みプロンプトと生成結果を連結したトークン列を、改めてモデルに1回入力し、`hidden_states[TARGET_LAYER]` から全トークンのhidden stateを取得する (Causalなモデルのため、生成時に逐次取得した値と同じになる)。
+4. 各トークンのhidden stateと各感情ベクトル (`TARGET_LAYER` の要素) とのコサイン類似度を計算する。
+5. 結果をJSONで保存する。
+
+#### 出力形式
+
+```json
+{
+  "prompt": "ユーザーが入力したプロンプト",
+  "response": "生成された応答",
+  "layer": 21,
+  "emotions": [
+    "Joy",
+    "Anticipation",
+    "Trust",
+    "Fear",
+    "Surprise",
+    "Sadness",
+    "Disgust",
+    "Anger"
+  ],
+  "tokens": [
+    {
+      "index": 0,
+      "token": "Human",
+      "role": "input",
+      "similarity": {
+        "Joy": 0.012,
+        "Anticipation": -0.004,
+        "Trust": 0.008,
+        "Fear": -0.021,
+        "Surprise": 0.003,
+        "Sadness": -0.01,
+        "Disgust": -0.015,
+        "Anger": -0.018
+      }
+    }
+  ]
+}
+```
+
+- `token`: トークンをデコードした文字列
+- `role`: 整形済みプロンプトのトークンは `input`、生成されたトークンは `output`
+- 先頭の `<|begin_of_text|>` や、生成停止の原因になった `\nHuman:` のトークンも `tokens` に含まれる
+- `similarity`: 各感情ベクトルとのコサイン類似度
+
+#### 解釈上の注意
+
+- 論文によると、感情ベクトルはその時点で効いている感情を表し、会話全体を通した持続的な感情状態は表さない。トークンごとの値は変動が大きいため、近くのトークンで平均すると解釈しやすい。
+- `Assistant:` のコロンのトークン (応答直前) の値は、これから生成される応答の感情をよく予測するとされている。
