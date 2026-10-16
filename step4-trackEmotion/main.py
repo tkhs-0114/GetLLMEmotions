@@ -19,8 +19,18 @@ vector_dir = project_root / "step3-getEmovitonVec" / "output"
 output_dir = step_dir / "output"
 
 parser = argparse.ArgumentParser(description="プロンプトと生成結果のトークンごとに感情ベクトルとのコサイン類似度を計算する")
-parser.add_argument("prompt", help="LLMに入力するプロンプト")
+parser.add_argument("prompt", help="LLMに入力するプロンプト（最後のHumanの発話）")
+parser.add_argument(
+    "--history",
+    type=Path,
+    help='過去の会話のJSONファイル。[{"human": "...", "assistant": "..."}, ...] の形式',
+)
 args = parser.parse_args()
+
+history = []
+if args.history:
+    with args.history.open(encoding="utf-8") as f:
+        history = json.load(f)
 
 tokenizer = AutoTokenizer.from_pretrained(model_dir)
 model = AutoModelForCausalLM.from_pretrained(model_dir)
@@ -34,7 +44,10 @@ emotion_matrix = torch.stack([
     for emotion in emotions
 ]).to(device=device, dtype=torch.float32)  # [感情数, hidden_size]
 
-formatted_prompt = f"Human: {args.prompt}\n\nAssistant:"
+formatted_prompt = "".join(
+    f"Human: {turn['human']}\n\nAssistant: {turn['assistant']}\n\n" for turn in history
+)
+formatted_prompt += f"Human: {args.prompt}\n\nAssistant:"
 inputs = tokenizer(formatted_prompt, return_tensors="pt").to(device)
 input_length = inputs["input_ids"].shape[1]
 
@@ -65,6 +78,7 @@ for index, (token_id, scores) in enumerate(zip(full_ids.tolist(), similarity.tol
     })
 
 result = {
+    "history": history,
     "prompt": args.prompt,
     "response": tokenizer.decode(full_ids[input_length:], skip_special_tokens=True),
     "layer": TARGET_LAYER,
